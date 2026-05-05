@@ -275,6 +275,68 @@ impl Economy {
             .sum()
     }
 
+    /// All ledger entries for a wallet since a unix timestamp.
+    pub fn spent_since(&self, wallet_id: &str, since: u64) -> Vec<LedgerEntry> {
+        let path = self.data_dir.join("ledger.jsonl");
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+        content.lines()
+            .filter_map(|l| serde_json::from_str::<LedgerEntry>(l).ok())
+            .filter(|e| e.wallet_id == wallet_id && e.timestamp >= since && e.amount < 0)
+            .collect()
+    }
+
+    /// Transfer coins from one wallet to another.
+    pub fn transfer(&mut self, from: &str, to: &str, amount: i64, detail: &str) -> Result<(), SpendError> {
+        let from_wallet = self.wallets.get(from)
+            .ok_or_else(|| SpendError::WalletNotFound(from.to_string()))?;
+
+        if from_wallet.balance < amount {
+            return Err(SpendError::InsufficientBalance {
+                wallet_id: from.to_string(),
+                balance: from_wallet.balance,
+                cost: amount,
+            });
+        }
+
+        self.create_wallet(to);
+        let ts = now();
+
+        let from_balance = {
+            let w = self.wallets.get_mut(from).unwrap();
+            w.balance -= amount;
+            w.total_spent += amount;
+            w.balance
+        };
+
+        let to_balance = {
+            let w = self.wallets.get_mut(to).unwrap();
+            w.balance += amount;
+            w.total_earned += amount;
+            w.balance
+        };
+
+        self.append_ledger(&LedgerEntry {
+            wallet_id: from.to_string(),
+            action: "transfer_out".to_string(),
+            amount: -amount,
+            balance_after: from_balance,
+            detail: format!("→ {}: {}", to, detail),
+            timestamp: ts,
+        });
+
+        self.append_ledger(&LedgerEntry {
+            wallet_id: to.to_string(),
+            action: "transfer_in".to_string(),
+            amount,
+            balance_after: to_balance,
+            detail: format!("← {}: {}", from, detail),
+            timestamp: ts,
+        });
+
+        self.save_wallets();
+        Ok(())
+    }
+
     // ── Persistence ─────────────────────────────────────────
 
     fn save_wallets(&self) {
@@ -383,13 +445,73 @@ mod tests {
         e.set_cost("action", 10);
         e.credit("rich", 1000, "loaded");
         e.credit("poor", 5, "barely anything");
-        e.spend("poor", "action", "this should fail").ok(); // fails, but total_spent stays 0
-        // Manually debit to get total_spent > 0
+        e.spend("poor", "action", "this should fail").ok();
         e.credit("poor", 20, "more");
         e.spend("poor", "action", "now it works").unwrap();
 
         let low = e.low_balance(50);
         assert_eq!(low.len(), 1);
         assert_eq!(low[0].id, "poor");
+    }
+
+    #[test]
+    fn test_transfer() {
+        let mut e = Economy::in_memory();
+        e.credit("dad", 100, "startup");
+        e.credit("son", 10, "startup");
+
+        e.transfer("dad", "son", 25, "allowance").unwrap();
+        assert_eq!(e.balance("dad"), Some(75));
+        assert_eq!(e.balance("son"), Some(35));
+    }
+
+    #[test]
+    fn test_transfer_insufficient() {
+        let mut e = Economy::in_memory();
+        e.credit("sender", 10, "not much");
+        e.credit("receiver", 0, "empty");
+
+        let result = e.transfer("sender", "receiver", 50, "too much");
+        assert!(result.is_err());
+        assert_eq!(e.balance("sender"), Some(10));
+    }
+
+    #[test]
+    fn test_transfer_creates_recipient() {
+        let mut e = Economy::in_memory();
+        e.credit("sender", 100, "has coins");
+
+        e.transfer("sender", "new-user", 30, "welcome gift").unwrap();
+        assert_eq!(e.balance("sender"), Some(70));
+        assert_eq!(e.balance("new-user"), Some(30));
+    }
+
+    #[test]
+    fn test_debit_arbitrary() {
+        let mut e = Economy::in_memory();
+        e.credit("user", 100, "start");
+
+        let bal = e.debit("user", 37, "custom charge").unwrap();
+        assert_eq!(bal, 63);
+    }
+
+    #[test]
+    fn test_multiple_actions() {
+        let mut e = Economy::in_memory();
+        e.set_cost("cheap", 1);
+        e.set_cost("medium", 5);
+        e.set_cost("expensive", 25);
+        e.credit("user", 100, "start");
+
+        e.spend("user", "cheap", "x").unwrap();
+        e.spend("user", "cheap", "x").unwrap();
+        e.spend("user", "medium", "x").unwrap();
+        e.spend("user", "expensive", "x").unwrap();
+
+        assert_eq!(e.balance("user"), Some(68));
+
+        let w = e.wallet("user").unwrap();
+        assert_eq!(w.total_spent, 32);
+        assert_eq!(w.total_earned, 100);
     }
 }
