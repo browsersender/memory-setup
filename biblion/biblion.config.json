@@ -1,0 +1,8 @@
+{
+    "roots": [
+        { "path": "Desktop/Project Bibles", "domain": "bibles", "comment": "Your project bibles" },
+        { "path": "Desktop/Papers", "domain": "papers", "comment": "Research papers (optional)" },
+        { "path": ".claude/memory", "domain": "memory", "comment": "Claude Code memory files (optional)" }
+    ],
+    "port": 3333
+}
